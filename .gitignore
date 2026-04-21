@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyz
+*.egg-info/
+.venv/
+.python-version
+
+# IDE
+.vscode/
+.claude/settings.local.json
+
+# Executables
+*.exe
+*.pkg
