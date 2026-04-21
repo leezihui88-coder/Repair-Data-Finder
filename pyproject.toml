@@ -1,0 +1,11 @@
+[project]
+name = "finder"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyinstaller>=6.19.0",
+    "selenium>=4.43.0",
+    "webdriver-manager>=4.0.2",
+]
