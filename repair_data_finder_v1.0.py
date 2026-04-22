@@ -858,42 +858,89 @@ class App:
             self._q(type='done')
 
     # ══════════════════════════════════════════════════════════════════
-    #  PDM 登入（自動填入 + fallback 手動）
+    #  PDM 登入
     # ══════════════════════════════════════════════════════════════════
     def _pdm_login(self) -> bool:
         """
-        嘗試自動填入 PDM 登入表單。
-        若偵測不到表單（SSO / 已登入），直接等待主頁面。
+        PDM 登入主流程：
+        1. 已登入 → 直接通過
+        2. 有儲存帳密 → 自動填入
+        3. 無儲存帳密 → 先彈出對話框儲存，再自動填入
+        4. 自動填入失敗（密碼更換）→ 重新輸入，詢問是否儲存新密碼
+        5. 找不到登入表單（SSO）→ 手動登入後詢問是否儲存
         """
-        drv = self.pdm_drv
         time.sleep(2)
 
-        # 偵測是否已在主頁（SSO 自動通過 or 已有 session）
+        # ── 步驟 1：已登入 ────────────────────────────────────────────
         if self._pdm_is_home():
             self._ql('✅ PDM 已登入（Session 尚有效）', 'OK')
             return True
 
-        # 嘗試尋找標準 Windchill / ADFS 登入表單
-        auto_ok = self._pdm_try_autofill()
-        if auto_ok:
+        # ── 步驟 2：取得帳密（從儲存或對話框）───────────────────────
+        saved_user, saved_pwd = CredentialManager.load('pdm')
+
+        if not saved_user:
+            self._ql('ℹ️ PDM 尚無儲存帳密，請在對話框輸入', 'INFO')
+            cred = self._ask_credentials(
+                'pdm',
+                message='請輸入 PDM 帳號密碼。\n勾選「記住密碼」後，下次將自動填入。')
+            if cred:
+                saved_user, saved_pwd, remember = cred
+                if remember:
+                    CredentialManager.save('pdm', saved_user, saved_pwd)
+                    self._ql('✅ PDM 帳密已儲存', 'OK')
+
+        # ── 步驟 3：等待登入頁面出現，偵測表單 ──────────────────────
+        # 最多等 15 秒讓頁面完成載入／重導向
+        form_found = self._pdm_wait_for_form(timeout=15)
+
+        if form_found and saved_user:
+            # ── 步驟 4：自動填入 ─────────────────────────────────────
+            fill_ok = self._pdm_fill_form(saved_user, saved_pwd)
+            if fill_ok:
+                # 等待登入完成
+                if self._wait_pdm_login(timeout=60):
+                    self._ql('✅ PDM 自動登入成功', 'OK')
+                    return True
+
+            # ── 步驟 5：填入失敗（密碼更換）────────────────────────
+            self._ql('⚠ PDM 自動登入失敗，密碼可能已更換', 'WARN')
+            cred = self._ask_credentials(
+                'pdm', prefill_user=saved_user,
+                message='⚠ 登入失敗！請重新輸入帳號密碼。')
+            if not cred:
+                return False
+            new_user, new_pwd, _ = cred
+
+            # 重新填入
+            self._pdm_fill_form(new_user, new_pwd)
+            if not self._wait_pdm_login(timeout=60):
+                return False
+
+            # 密碼有變更 → 詢問是否儲存
+            if new_user != saved_user or new_pwd != saved_pwd:
+                self._ql('🔔 偵測到 PDM 密碼與上次不同', 'WARN')
+                if self._ask_save_password('pdm'):
+                    CredentialManager.save('pdm', new_user, new_pwd)
+                    self._ql('✅ PDM 新密碼已儲存', 'OK')
             return True
 
-        # Fallback：手動登入（顯示提示 popup）
-        self._ql('⚠ 未偵測到 PDM 登入表單（可能為 SSO），請手動登入', 'WARN')
+        # ── 步驟 6：找不到表單（SSO 或其他）→ 手動登入 ──────────────
+        self._ql('⚠ 未偵測到 PDM 登入表單，請手動完成登入', 'WARN')
         self._q(type='popup', sys='PDM (Windchill)')
-        ok = self._wait_pdm_login()
+        ok = self._wait_pdm_login(timeout=180)
         if ok:
-            # 問是否要儲存帳密（手動登入後）
-            self._ql('💡 手動登入成功，建議設定帳密以便下次自動登入', 'INFO')
-            saved_user, saved_pwd = CredentialManager.load('pdm')
-            if not saved_user:
-                cred = self._ask_credentials(
-                    'pdm', message='是否儲存帳密以便下次自動登入？（如為 SSO 可略過）')
-                if cred:
-                    u, p, remember = cred
-                    if remember:
-                        CredentialManager.save('pdm', u, p)
-                        self._ql('✅ PDM 帳密已儲存', 'OK')
+            self._ql('✅ PDM 手動登入成功', 'OK')
+            # 無論之前是否有儲存，都詢問一次是否儲存
+            cred = self._ask_credentials(
+                'pdm',
+                prefill_user=saved_user or '',
+                message='登入成功！\n是否儲存帳密以便下次自動填入？')
+            if cred:
+                u, p, remember = cred
+                if remember:
+                    CredentialManager.save('pdm', u, p)
+                    self._ql('✅ PDM 帳密已儲存', 'OK')
         return ok
 
     def _pdm_is_home(self) -> bool:
@@ -904,38 +951,61 @@ class App:
         except Exception:
             return False
 
-    def _pdm_try_autofill(self) -> bool:
-        """嘗試自動填入 PDM 登入表單，成功回傳 True"""
+    def _pdm_wait_for_form(self, timeout: int = 15) -> bool:
+        """
+        等待 PDM 登入表單出現（密碼欄位）。
+        涵蓋 Windchill 原生、ADFS、Windows Auth 等多種情境。
+        回傳 True 表示找到密碼欄位。
+        """
         drv = self.pdm_drv
+        self._ql('⏳ 等待 PDM 登入頁面...', 'INFO')
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # 若已到主頁就不需要再找表單
+            if self._pdm_is_home():
+                return False  # 已登入，不需填入
+            try:
+                drv.find_element(By.XPATH, '//input[@type="password"]')
+                self._ql('✅ 偵測到 PDM 登入表單', 'INFO')
+                return True
+            except Exception:
+                pass
+            time.sleep(0.8)
+        return False
 
-        # 常見 Windchill / ADFS 帳號欄位選擇器
+    def _pdm_fill_form(self, user: str, pwd: str) -> bool:
+        """
+        填入 PDM 登入表單帳號密碼並送出。
+        支援 Windchill (j_username)、ADFS (UserName)、一般 text 欄位。
+        """
+        drv = self.pdm_drv
+        # 帳號欄位（優先順序：Windchill → ADFS → 通用）
         user_xpaths = [
             '//input[@name="j_username"]',
             '//input[@id="j_username"]',
+            '//input[@name="UserName"]',       # ADFS
+            '//input[@id="userNameInput"]',    # ADFS
+            '//input[@autocomplete="username"]',
             '//input[@type="text" and contains(@name,"user")]',
             '//input[@type="text" and contains(@id,"user")]',
-            '//input[@autocomplete="username"]',
             '//input[@type="text"][1]',
         ]
+        # 密碼欄位
         pwd_xpaths = [
             '//input[@name="j_password"]',
             '//input[@id="j_password"]',
+            '//input[@name="Password"]',       # ADFS
+            '//input[@id="passwordInput"]',    # ADFS
             '//input[@type="password"]',
         ]
 
-        user_el = None
+        user_el, pwd_el = None, None
         for xp in user_xpaths:
             try:
-                user_el = WebDriverWait(drv, 3).until(
-                    EC.presence_of_element_located((By.XPATH, xp)))
+                user_el = drv.find_element(By.XPATH, xp)
                 break
             except Exception:
                 continue
-
-        if not user_el:
-            return False  # 沒找到表單
-
-        pwd_el = None
         for xp in pwd_xpaths:
             try:
                 pwd_el = drv.find_element(By.XPATH, xp)
@@ -943,77 +1013,22 @@ class App:
             except Exception:
                 continue
 
-        if not pwd_el:
+        if not user_el or not pwd_el:
+            self._ql('⚠ 找不到帳號或密碼欄位', 'WARN')
             return False
 
-        # 取出儲存的帳密
-        saved_user, saved_pwd = CredentialManager.load('pdm')
-        if not saved_user:
-            # 第一次：彈出對話框
-            self._ql('ℹ️ PDM 尚無儲存帳密，請輸入', 'INFO')
-            cred = self._ask_credentials('pdm')
-            if not cred: return False
-            saved_user, saved_pwd, remember = cred
-            if remember:
-                CredentialManager.save('pdm', saved_user, saved_pwd)
-                self._ql('✅ PDM 帳密已儲存', 'OK')
-
-        # 填入
-        self._ql('🔐 正在自動填入 PDM 帳密...', 'INFO')
-        drv.execute_script("arguments[0].value = '';", user_el)
-        user_el.click(); user_el.send_keys(saved_user)
-        drv.execute_script("arguments[0].value = '';", pwd_el)
-        pwd_el.click();  pwd_el.send_keys(saved_pwd)
-        pwd_el.send_keys(Keys.RETURN)
-        time.sleep(3)
-
-        # 檢查登入結果
-        if self._pdm_is_home():
-            self._ql('✅ PDM 自動登入成功', 'OK')
-            return True
-
-        # 登入失敗（密碼錯誤？）
-        self._ql('⚠ PDM 自動登入失敗，密碼可能已更換', 'WARN')
-        return self._pdm_handle_wrong_pwd(saved_user, saved_pwd)
-
-    def _pdm_handle_wrong_pwd(self, old_user: str, old_pwd: str) -> bool:
-        """PDM 密碼錯誤時，重新輸入並詢問是否更新"""
-        cred = self._ask_credentials(
-            'pdm', prefill_user=old_user,
-            message='⚠ 登入失敗！密碼可能已更換，請重新輸入。')
-        if not cred: return False
-        new_user, new_pwd, _ = cred
-
-        # 重填表單
-        drv = self.pdm_drv
         try:
-            for xp in ['//input[@name="j_username"]', '//input[@type="text"][1]']:
-                try:
-                    u_el = drv.find_element(By.XPATH, xp); break
-                except Exception: continue
-            for xp in ['//input[@name="j_password"]', '//input[@type="password"]']:
-                try:
-                    p_el = drv.find_element(By.XPATH, xp); break
-                except Exception: continue
-            drv.execute_script("arguments[0].value = '';", u_el)
-            u_el.click(); u_el.send_keys(new_user)
-            drv.execute_script("arguments[0].value = '';", p_el)
-            p_el.click(); p_el.send_keys(new_pwd)
-            p_el.send_keys(Keys.RETURN)
-            time.sleep(3)
-        except Exception:
-            pass
-
-        if not self._wait_pdm_login(timeout=60):
+            self._ql('🔐 正在自動填入 PDM 帳密...', 'INFO')
+            drv.execute_script("arguments[0].value='';", user_el)
+            user_el.click(); user_el.send_keys(user)
+            drv.execute_script("arguments[0].value='';", pwd_el)
+            pwd_el.click(); pwd_el.send_keys(pwd)
+            pwd_el.send_keys(Keys.RETURN)
+            time.sleep(2)
+            return True
+        except Exception as e:
+            self._ql(f'填入表單時發生錯誤：{str(e)[:60]}', 'WARN')
             return False
-
-        # 密碼有變更 → 詢問是否儲存
-        if new_pwd != old_pwd or new_user != old_user:
-            self._ql('🔔 偵測到 PDM 密碼與儲存的不同', 'WARN')
-            if self._ask_save_password('pdm'):
-                CredentialManager.save('pdm', new_user, new_pwd)
-                self._ql('✅ PDM 新密碼已儲存', 'OK')
-        return True
 
     # ══════════════════════════════════════════════════════════════════
     #  WNJPHandler 對話框：自動點擊「開啟」
