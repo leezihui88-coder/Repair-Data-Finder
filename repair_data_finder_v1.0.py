@@ -1040,12 +1040,16 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     def _auto_click_wnjp_dialog(self, drv=None):
         """
-        自動點擊瀏覽器的「開啟 WNJPHandler」對話框。
-        Chrome/Edge 的此對話框屬於瀏覽器內部 UI，無法用 UI Automation 存取，
-        改用 pyautogui 依瀏覽器視窗位置計算按鈕座標並點擊。
+        自動點擊「開啟 WNJPHandler」對話框的「開啟」按鈕。
 
-        對話框出現在瀏覽器內容區域頂部中央，「開啟」按鈕在右側。
-        最多等候 8 秒。
+        對話框佈局（從截圖確認）：
+          [ 開啟（白色） ]  [ 取消（藍色） ]
+
+        策略：
+          1. 每 0.5 秒截全螢幕，在瀏覽器視窗範圍內搜尋 Edge 藍色（取消按鈕）
+          2. 找到藍色區塊後，往左偏移約一個按鈕寬度即為「開啟」的位置
+          3. 點擊之
+        最多等候 10 秒。
         """
         try:
             import pyautogui
@@ -1054,43 +1058,65 @@ class App:
             return
 
         target_drv = drv or self.dmp_drv
-        try:
-            # 取得瀏覽器視窗的位置與大小
-            rect = target_drv.get_window_rect()
-            win_x = rect['x']
-            win_y = rect['y']
-            win_w = rect['width']
-            win_h = rect['height']
-        except Exception:
-            # 若無法取得視窗資訊，使用螢幕中央估算
-            sw, sh = pyautogui.size()
-            win_x, win_y, win_w, win_h = sw // 4, sh // 4, sw // 2, sh // 2
 
-        # 對話框出現在視窗上半部，「開啟」按鈕在對話框右側
-        # 依截圖比例估算座標（視窗寬度中央偏右，垂直約 35%）
-        click_x = win_x + int(win_w * 0.62)
-        click_y = win_y + int(win_h * 0.35)
+        # 取得瀏覽器視窗範圍（用來縮小搜尋區域）
+        try:
+            rect  = target_drv.get_window_rect()
+            wx, wy = rect['x'], rect['y']
+            ww, wh = rect['width'], rect['height']
+        except Exception:
+            sw, sh = pyautogui.size()
+            wx, wy, ww, wh = 0, 0, sw, sh
 
         self._ql('⏳ 等待 WNJPHandler 對話框...', 'INFO')
-        for attempt in range(16):   # 最多等 8 秒（每 0.5 秒試一次）
+
+        for _ in range(20):   # 最多 10 秒（每 0.5 秒）
             time.sleep(0.5)
             try:
-                # 截圖確認對話框是否出現（在估算區域附近找「開啟」文字的按鈕色塊）
-                screenshot = pyautogui.screenshot(
-                    region=(win_x + int(win_w * 0.3),
-                            win_y + int(win_h * 0.2),
-                            int(win_w * 0.5),
-                            int(win_h * 0.3)))
-                # 檢查該區域是否有對話框特徵色（白色背景區塊）
-                pixels = screenshot.getdata()
-                white_count = sum(1 for r, g, b in pixels if r > 240 and g > 240 and b > 240)
-                if white_count > len(pixels) * 0.3:  # 超過 30% 為白色 → 對話框存在
-                    pyautogui.click(click_x, click_y)
-                    self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
-                    self._q(type='dot', sys='dmp', ok=True)
-                    return
-            except Exception:
-                pass
+                shot  = pyautogui.screenshot()
+                img   = shot.convert('RGB')
+                pw, ph = img.size
+                pix   = img.load()
+
+                # ── 在視窗範圍內搜尋 Edge 藍色（取消按鈕）──────────
+                # Edge 主題藍 #0078D4 → R≈0, G≈120, B≈212（允許 ±40 容差）
+                blue_xs, blue_ys = [], []
+                x1 = max(0, wx);        x2 = min(pw, wx + ww)
+                y1 = max(0, wy + 60);   y2 = min(ph, wy + wh)  # 跳過標題列
+
+                step = 3   # 每 3px 取樣一次，兼顧速度與精度
+                for sy in range(y1, y2, step):
+                    for sx in range(x1, x2, step):
+                        r, g, b = pix[sx, sy]
+                        if r < 80 and 80 < g < 180 and b > 160:
+                            blue_xs.append(sx)
+                            blue_ys.append(sy)
+
+                if len(blue_xs) < 30:   # 藍色像素太少，對話框還沒出現
+                    continue
+
+                # ── 計算藍色按鈕中心 ─────────────────────────────────
+                cancel_x = int(sum(blue_xs) / len(blue_xs))
+                cancel_y = int(sum(blue_ys) / len(blue_ys))
+
+                # 估算按鈕寬度（藍色區域的水平跨距）
+                btn_span = max(blue_xs) - min(blue_xs)
+                offset   = max(btn_span + 20, 90)   # 偏移至少 90px
+
+                # 「開啟」在「取消」左邊
+                open_x = cancel_x - offset
+                open_y = cancel_y
+
+                pyautogui.click(open_x, open_y)
+                self._ql(
+                    f'✅ 已自動點擊「開啟」按鈕 '
+                    f'(取消位置 {cancel_x},{cancel_y} → 開啟 {open_x},{open_y})',
+                    'OK')
+                self._q(type='dot', sys='dmp', ok=True)
+                return
+
+            except Exception as e:
+                self._ql(f'偵測例外：{str(e)[:40]}', 'WARN')
 
         self._ql('⚠ 未偵測到對話框，請手動點擊「開啟」', 'WARN')
 
