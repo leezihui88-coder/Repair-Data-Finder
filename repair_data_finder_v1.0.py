@@ -863,85 +863,91 @@ class App:
     def _pdm_login(self) -> bool:
         """
         PDM 登入主流程：
-        1. 已登入 → 直接通過
-        2. 有儲存帳密 → 自動填入
-        3. 無儲存帳密 → 先彈出對話框儲存，再自動填入
-        4. 自動填入失敗（密碼更換）→ 重新輸入，詢問是否儲存新密碼
-        5. 找不到登入表單（SSO）→ 手動登入後詢問是否儲存
+
+        情境 A — 第一次使用（無儲存帳密）：
+          彈出對話框輸入 → 儲存 → 自動填入 → 登入成功 ✅
+
+        情境 B — 之後每次（有儲存帳密）：
+          自動填入 → 登入成功 ✅（無需任何操作）
+
+        情境 C — 帳密已更換（自動填入後顯示錯誤）：
+          自動填入失敗 → 日誌提示「請在瀏覽器手動輸入」
+          → 使用者在瀏覽器直接打新帳密 → 登入成功
+          → 程式詢問「是否儲存新帳密？」→ 儲存 ✅
+
+        情境 D — 找不到登入表單（SSO）：
+          手動登入 → 成功後詢問是否儲存帳密
         """
         time.sleep(2)
 
-        # ── 步驟 1：已登入 ────────────────────────────────────────────
+        # ── 情境 B（或已有 session）：直接通過 ───────────────────────
         if self._pdm_is_home():
             self._ql('✅ PDM 已登入（Session 尚有效）', 'OK')
             return True
 
-        # ── 步驟 2：取得帳密（從儲存或對話框）───────────────────────
         saved_user, saved_pwd = CredentialManager.load('pdm')
 
+        # ── 情境 A：第一次，無儲存帳密 ──────────────────────────────
         if not saved_user:
-            self._ql('ℹ️ PDM 尚無儲存帳密，請在對話框輸入', 'INFO')
+            self._ql('ℹ️ 第一次使用，請在對話框輸入 PDM 帳號密碼', 'INFO')
             cred = self._ask_credentials(
                 'pdm',
-                message='請輸入 PDM 帳號密碼。\n勾選「記住密碼」後，下次將自動填入。')
+                message='請輸入 PDM 帳號密碼。\n勾選「記住密碼」後，下次自動填入，無須再輸入。')
             if cred:
                 saved_user, saved_pwd, remember = cred
                 if remember:
                     CredentialManager.save('pdm', saved_user, saved_pwd)
                     self._ql('✅ PDM 帳密已儲存', 'OK')
 
-        # ── 步驟 3：等待登入頁面出現，偵測表單 ──────────────────────
-        # 最多等 15 秒讓頁面完成載入／重導向
+        # ── 等待登入頁面載入 ──────────────────────────────────────────
         form_found = self._pdm_wait_for_form(timeout=15)
 
         if form_found and saved_user:
-            # ── 步驟 4：自動填入 ─────────────────────────────────────
-            fill_ok = self._pdm_fill_form(saved_user, saved_pwd)
-            if fill_ok:
-                # 等待登入完成
-                if self._wait_pdm_login(timeout=60):
-                    self._ql('✅ PDM 自動登入成功', 'OK')
-                    return True
+            # ── 情境 B：自動填入 ──────────────────────────────────────
+            self._pdm_fill_form(saved_user, saved_pwd)
+            login_ok = self._wait_pdm_login(timeout=30)
 
-            # ── 步驟 5：填入失敗（密碼更換）────────────────────────
-            self._ql('⚠ PDM 自動登入失敗，密碼可能已更換', 'WARN')
+            if login_ok:
+                self._ql('✅ PDM 自動登入成功', 'OK')
+                return True
+
+            # ── 情境 C：自動填入失敗（帳密錯誤）────────────────────
+            self._ql('⚠ 自動登入失敗，帳密可能已更換', 'WARN')
+            self._ql('👉 請直接在瀏覽器視窗輸入正確帳號密碼', 'WARN')
+            # 等候使用者在瀏覽器手動輸入（最多 3 分鐘）
+            login_ok = self._wait_pdm_login(timeout=180)
+            if not login_ok:
+                return False
+
+            # 登入成功 → 詢問是否儲存新帳密
+            self._ql('✅ PDM 手動登入成功，帳密可能已更換', 'OK')
             cred = self._ask_credentials(
-                'pdm', prefill_user=saved_user,
-                message='⚠ 登入失敗！請重新輸入帳號密碼。')
-            if not cred:
-                return False
-            new_user, new_pwd, _ = cred
-
-            # 重新填入
-            self._pdm_fill_form(new_user, new_pwd)
-            if not self._wait_pdm_login(timeout=60):
-                return False
-
-            # 密碼有變更 → 詢問是否儲存
-            if new_user != saved_user or new_pwd != saved_pwd:
-                self._ql('🔔 偵測到 PDM 密碼與上次不同', 'WARN')
-                if self._ask_save_password('pdm'):
+                'pdm',
+                prefill_user=saved_user,
+                message='🔔 偵測到帳密可能已更換。\n請輸入這次登入的帳號密碼，程式將記住以便下次自動填入。')
+            if cred:
+                new_user, new_pwd, remember = cred
+                if remember and (new_user != saved_user or new_pwd != saved_pwd):
                     CredentialManager.save('pdm', new_user, new_pwd)
-                    self._ql('✅ PDM 新密碼已儲存', 'OK')
+                    self._ql('✅ PDM 新帳密已儲存', 'OK')
             return True
 
-        # ── 步驟 6：找不到表單（SSO 或其他）→ 手動登入 ──────────────
+        # ── 情境 D：找不到登入表單（SSO 等）────────────────────────
         self._ql('⚠ 未偵測到 PDM 登入表單，請手動完成登入', 'WARN')
         self._q(type='popup', sys='PDM (Windchill)')
-        ok = self._wait_pdm_login(timeout=180)
-        if ok:
+        login_ok = self._wait_pdm_login(timeout=180)
+        if login_ok:
             self._ql('✅ PDM 手動登入成功', 'OK')
-            # 無論之前是否有儲存，都詢問一次是否儲存
             cred = self._ask_credentials(
                 'pdm',
                 prefill_user=saved_user or '',
-                message='登入成功！\n是否儲存帳密以便下次自動填入？')
+                message='登入成功！\n請輸入帳號密碼讓程式記住，下次將自動填入。')
             if cred:
                 u, p, remember = cred
                 if remember:
                     CredentialManager.save('pdm', u, p)
                     self._ql('✅ PDM 帳密已儲存', 'OK')
-        return ok
+        return login_ok
 
     def _pdm_is_home(self) -> bool:
         try:
