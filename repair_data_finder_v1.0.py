@@ -1043,80 +1043,77 @@ class App:
         自動點擊「開啟 WNJPHandler」對話框的「開啟」按鈕。
 
         對話框佈局（從截圖確認）：
-          [ 開啟（白色） ]  [ 取消（藍色） ]
+          [ 開啟（白色） ]  [ 取消（藍色 #0078D4） ]
 
         策略：
-          1. 每 0.5 秒截全螢幕，在瀏覽器視窗範圍內搜尋 Edge 藍色（取消按鈕）
-          2. 找到藍色區塊後，往左偏移約一個按鈕寬度即為「開啟」的位置
-          3. 點擊之
-        最多等候 10 秒。
+          用 PIL.ImageGrab 截圖（不依賴 pyscreeze），
+          在瀏覽器視窗內搜尋 Edge 藍色像素群（取消按鈕），
+          往左偏移一個按鈕寬度點擊「開啟」。
+          最多等候 10 秒。
         """
         try:
             import pyautogui
-        except ImportError:
-            self._ql('⚠ 未安裝 pyautogui，無法自動點擊「開啟」', 'WARN')
+            from PIL import ImageGrab
+        except ImportError as e:
+            self._ql(f'⚠ 缺少套件，無法自動點擊：{e}', 'WARN')
             return
 
         target_drv = drv or self.dmp_drv
 
-        # 取得瀏覽器視窗範圍（用來縮小搜尋區域）
+        # 取得瀏覽器視窗範圍
         try:
-            rect  = target_drv.get_window_rect()
+            rect = target_drv.get_window_rect()
             wx, wy = rect['x'], rect['y']
             ww, wh = rect['width'], rect['height']
         except Exception:
-            sw, sh = pyautogui.size()
-            wx, wy, ww, wh = 0, 0, sw, sh
+            wx, wy, ww, wh = 0, 0, *pyautogui.size()
 
         self._ql('⏳ 等待 WNJPHandler 對話框...', 'INFO')
 
-        for _ in range(20):   # 最多 10 秒（每 0.5 秒）
+        for _ in range(20):          # 最多 10 秒（每 0.5 秒）
             time.sleep(0.5)
             try:
-                shot  = pyautogui.screenshot()
-                img   = shot.convert('RGB')
+                # PIL.ImageGrab 直接截圖，不需要 pyscreeze
+                img  = ImageGrab.grab().convert('RGB')
                 pw, ph = img.size
-                pix   = img.load()
+                pix  = img.load()
 
-                # ── 在視窗範圍內搜尋 Edge 藍色（取消按鈕）──────────
-                # Edge 主題藍 #0078D4 → R≈0, G≈120, B≈212（允許 ±40 容差）
+                # 搜尋範圍：瀏覽器視窗內，跳過頂部 80px（標題列 + 網址列）
+                x1 = max(0, wx);       x2 = min(pw, wx + ww)
+                y1 = max(0, wy + 80);  y2 = min(ph, wy + wh)
+
+                # 掃描 Edge 藍色像素（#0078D4 ± 容差）
                 blue_xs, blue_ys = [], []
-                x1 = max(0, wx);        x2 = min(pw, wx + ww)
-                y1 = max(0, wy + 60);   y2 = min(ph, wy + wh)  # 跳過標題列
-
-                step = 3   # 每 3px 取樣一次，兼顧速度與精度
-                for sy in range(y1, y2, step):
-                    for sx in range(x1, x2, step):
+                for sy in range(y1, y2, 3):
+                    for sx in range(x1, x2, 3):
                         r, g, b = pix[sx, sy]
-                        if r < 80 and 80 < g < 180 and b > 160:
+                        if r < 60 and 90 < g < 170 and b > 180:
                             blue_xs.append(sx)
                             blue_ys.append(sy)
 
-                if len(blue_xs) < 30:   # 藍色像素太少，對話框還沒出現
+                if len(blue_xs) < 20:   # 藍色像素不足，對話框尚未出現
                     continue
 
-                # ── 計算藍色按鈕中心 ─────────────────────────────────
+                # 藍色按鈕（取消）中心
                 cancel_x = int(sum(blue_xs) / len(blue_xs))
                 cancel_y = int(sum(blue_ys) / len(blue_ys))
 
-                # 估算按鈕寬度（藍色區域的水平跨距）
+                # 按鈕寬度估算，往左找「開啟」
                 btn_span = max(blue_xs) - min(blue_xs)
-                offset   = max(btn_span + 20, 90)   # 偏移至少 90px
-
-                # 「開啟」在「取消」左邊
-                open_x = cancel_x - offset
-                open_y = cancel_y
+                offset   = max(btn_span + 24, 100)
+                open_x   = cancel_x - offset
+                open_y   = cancel_y
 
                 pyautogui.click(open_x, open_y)
                 self._ql(
-                    f'✅ 已自動點擊「開啟」按鈕 '
-                    f'(取消位置 {cancel_x},{cancel_y} → 開啟 {open_x},{open_y})',
+                    f'✅ 已自動點擊「開啟」'
+                    f'（取消:{cancel_x},{cancel_y} → 開啟:{open_x},{open_y}）',
                     'OK')
                 self._q(type='dot', sys='dmp', ok=True)
                 return
 
             except Exception as e:
-                self._ql(f'偵測例外：{str(e)[:40]}', 'WARN')
+                self._ql(f'偵測例外：{str(e)[:50]}', 'WARN')
 
         self._ql('⚠ 未偵測到對話框，請手動點擊「開啟」', 'WARN')
 
