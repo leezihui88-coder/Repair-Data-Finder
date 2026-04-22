@@ -9,4 +9,5 @@ dependencies = [
     "selenium>=4.43.0",
     "webdriver-manager>=4.0.2",
     "keyring>=25.0.0",
+    "pyautogui>=0.9.54",
 ]

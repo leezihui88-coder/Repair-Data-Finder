@@ -862,92 +862,91 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     def _pdm_login(self) -> bool:
         """
-        PDM 登入主流程：
+        PDM 登入主流程（HTTP Basic Auth 版本）：
 
-        情境 A — 第一次使用（無儲存帳密）：
-          彈出對話框輸入 → 儲存 → 自動填入 → 登入成功 ✅
+        PDM 使用瀏覽器原生 HTTP Basic Auth 彈窗（非 HTML 表單），
+        解法：將帳密嵌入 URL（https://user:pwd@host/path）直接繞過彈窗。
 
-        情境 B — 之後每次（有儲存帳密）：
-          自動填入 → 登入成功 ✅（無需任何操作）
-
-        情境 C — 帳密已更換（自動填入後顯示錯誤）：
-          自動填入失敗 → 日誌提示「請在瀏覽器手動輸入」
-          → 使用者在瀏覽器直接打新帳密 → 登入成功
-          → 程式詢問「是否儲存新帳密？」→ 儲存 ✅
-
-        情境 D — 找不到登入表單（SSO）：
-          手動登入 → 成功後詢問是否儲存帳密
+        情境 A — 第一次：對話框輸入 → 儲存 → URL 嵌入帳密自動登入
+        情境 B — 之後每次：直接 URL 嵌入帳密，靜默登入
+        情境 C — 帳密更換：登入失敗 → 對話框重新輸入 → 儲存新帳密
         """
-        time.sleep(2)
+        from urllib.parse import quote, urlparse
 
-        # ── 情境 B（或已有 session）：直接通過 ───────────────────────
+        time.sleep(1.5)
+
+        # ── 已有 session，直接通過 ───────────────────────────────────
         if self._pdm_is_home():
             self._ql('✅ PDM 已登入（Session 尚有效）', 'OK')
             return True
 
+        # ── 取得帳密 ─────────────────────────────────────────────────
         saved_user, saved_pwd = CredentialManager.load('pdm')
 
-        # ── 情境 A：第一次，無儲存帳密 ──────────────────────────────
         if not saved_user:
+            # 情境 A：第一次，詢問帳密
             self._ql('ℹ️ 第一次使用，請在對話框輸入 PDM 帳號密碼', 'INFO')
             cred = self._ask_credentials(
                 'pdm',
-                message='請輸入 PDM 帳號密碼。\n勾選「記住密碼」後，下次自動填入，無須再輸入。')
-            if cred:
-                saved_user, saved_pwd, remember = cred
-                if remember:
-                    CredentialManager.save('pdm', saved_user, saved_pwd)
-                    self._ql('✅ PDM 帳密已儲存', 'OK')
-
-        # ── 等待登入頁面載入 ──────────────────────────────────────────
-        form_found = self._pdm_wait_for_form(timeout=15)
-
-        if form_found and saved_user:
-            # ── 情境 B：自動填入 ──────────────────────────────────────
-            self._pdm_fill_form(saved_user, saved_pwd)
-            login_ok = self._wait_pdm_login(timeout=30)
-
-            if login_ok:
-                self._ql('✅ PDM 自動登入成功', 'OK')
-                return True
-
-            # ── 情境 C：自動填入失敗（帳密錯誤）────────────────────
-            self._ql('⚠ 自動登入失敗，帳密可能已更換', 'WARN')
-            self._ql('👉 請直接在瀏覽器視窗輸入正確帳號密碼', 'WARN')
-            # 等候使用者在瀏覽器手動輸入（最多 3 分鐘）
-            login_ok = self._wait_pdm_login(timeout=180)
-            if not login_ok:
+                message='請輸入 PDM 帳號密碼。\n儲存後，下次將自動登入，無須再輸入。')
+            if not cred:
+                self._ql('❌ 未輸入帳密，無法自動登入', 'ERROR')
                 return False
+            saved_user, saved_pwd, remember = cred
+            if remember:
+                CredentialManager.save('pdm', saved_user, saved_pwd)
+                self._ql('✅ PDM 帳密已儲存', 'OK')
 
-            # 登入成功 → 詢問是否儲存新帳密
-            self._ql('✅ PDM 手動登入成功，帳密可能已更換', 'OK')
-            cred = self._ask_credentials(
-                'pdm',
-                prefill_user=saved_user,
-                message='🔔 偵測到帳密可能已更換。\n請輸入這次登入的帳號密碼，程式將記住以便下次自動填入。')
-            if cred:
-                new_user, new_pwd, remember = cred
-                if remember and (new_user != saved_user or new_pwd != saved_pwd):
-                    CredentialManager.save('pdm', new_user, new_pwd)
-                    self._ql('✅ PDM 新帳密已儲存', 'OK')
+        # ── 情境 B：URL 嵌入帳密，繞過 HTTP Basic Auth 彈窗 ────────
+        self._ql('🔐 正在自動登入 PDM...', 'INFO')
+        login_ok = self._pdm_auth_via_url(saved_user, saved_pwd)
+
+        if login_ok:
+            self._ql('✅ PDM 自動登入成功', 'OK')
             return True
 
-        # ── 情境 D：找不到登入表單（SSO 等）────────────────────────
-        self._ql('⚠ 未偵測到 PDM 登入表單，請手動完成登入', 'WARN')
-        self._q(type='popup', sys='PDM (Windchill)')
-        login_ok = self._wait_pdm_login(timeout=180)
-        if login_ok:
-            self._ql('✅ PDM 手動登入成功', 'OK')
-            cred = self._ask_credentials(
-                'pdm',
-                prefill_user=saved_user or '',
-                message='登入成功！\n請輸入帳號密碼讓程式記住，下次將自動填入。')
-            if cred:
-                u, p, remember = cred
-                if remember:
-                    CredentialManager.save('pdm', u, p)
-                    self._ql('✅ PDM 帳密已儲存', 'OK')
-        return login_ok
+        # ── 情境 C：帳密錯誤，重新輸入 ─────────────────────────────
+        self._ql('⚠ PDM 自動登入失敗，帳密可能已更換', 'WARN')
+        self._ql('👉 請在對話框輸入新帳號密碼', 'WARN')
+        cred = self._ask_credentials(
+            'pdm',
+            prefill_user=saved_user,
+            message='⚠ 登入失敗，帳密可能已更換。\n請重新輸入正確的帳號密碼。')
+        if not cred:
+            return False
+
+        new_user, new_pwd, _ = cred
+        login_ok = self._pdm_auth_via_url(new_user, new_pwd)
+        if not login_ok:
+            return False
+
+        # 新帳密與舊的不同 → 詢問是否儲存
+        if new_user != saved_user or new_pwd != saved_pwd:
+            self._ql('🔔 偵測到 PDM 帳密與上次不同', 'WARN')
+            if self._ask_save_password('pdm'):
+                CredentialManager.save('pdm', new_user, new_pwd)
+                self._ql('✅ PDM 新帳密已儲存', 'OK')
+        return True
+
+    def _pdm_auth_via_url(self, user: str, pwd: str) -> bool:
+        """
+        將帳密嵌入 URL，讓瀏覽器直接通過 HTTP Basic Auth，
+        不會出現「登錄以存取此網站」彈窗。
+        例：https://dana_lee:mypass@pap.moxa.com/Windchill/app/
+        """
+        from urllib.parse import quote, urlparse
+        drv = self.pdm_drv
+        try:
+            parsed   = urlparse(PDM_URL)
+            enc_user = quote(user, safe='')
+            enc_pwd  = quote(pwd,  safe='')
+            auth_url = f"{parsed.scheme}://{enc_user}:{enc_pwd}@{parsed.netloc}{parsed.path}"
+            drv.get(auth_url)
+            # 等待主頁面載入（最多 30 秒）
+            return self._wait_pdm_login(timeout=30)
+        except Exception as e:
+            self._ql(f'URL 登入例外：{str(e)[:60]}', 'WARN')
+            return False
 
     def _pdm_is_home(self) -> bool:
         try:
@@ -1039,50 +1038,61 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     #  WNJPHandler 對話框：自動點擊「開啟」
     # ══════════════════════════════════════════════════════════════════
-    def _auto_click_wnjp_dialog(self):
+    def _auto_click_wnjp_dialog(self, drv=None):
         """
-        使用 Windows UI Automation 自動點擊瀏覽器的「開啟 WNJPHandler」對話框。
-        最多等候 8 秒，每 0.5 秒嘗試一次。
+        自動點擊瀏覽器的「開啟 WNJPHandler」對話框。
+        Chrome/Edge 的此對話框屬於瀏覽器內部 UI，無法用 UI Automation 存取，
+        改用 pyautogui 依瀏覽器視窗位置計算按鈕座標並點擊。
+
+        對話框出現在瀏覽器內容區域頂部中央，「開啟」按鈕在右側。
+        最多等候 8 秒。
         """
-        import subprocess as _sp
-        ps_script = r"""
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-$desktop = [System.Windows.Automation.AutomationElement]::RootElement
-$found = $false
-for ($i = 0; $i -lt 16; $i++) {
-    foreach ($name in @("開啟", "Open")) {
-        $cond = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-        $btn = $desktop.FindFirst(
-            [System.Windows.Automation.TreeScope]::Descendants, $cond)
-        if ($btn -ne $null) {
-            try {
-                $invoke = $btn.GetCurrentPattern(
-                    [System.Windows.Automation.InvokePattern]::Pattern)
-                $invoke.Invoke()
-                Write-Output "clicked"
-                $found = $true
-                break
-            } catch {}
-        }
-    }
-    if ($found) { break }
-    Start-Sleep -Milliseconds 500
-}
-if (-not $found) { Write-Output "not_found" }
-"""
         try:
-            result = _sp.run(
-                ['powershell', '-NonInteractive', '-Command', ps_script],
-                capture_output=True, text=True, timeout=12)
-            if 'clicked' in result.stdout:
-                self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
-                self._q(type='dot', sys='dmp', ok=True)
-            else:
-                self._ql('⚠ 找不到「開啟」按鈕，請手動點擊', 'WARN')
-        except Exception as e:
-            self._ql(f'UI Automation 例外：{str(e)[:60]}', 'WARN')
+            import pyautogui
+        except ImportError:
+            self._ql('⚠ 未安裝 pyautogui，無法自動點擊「開啟」', 'WARN')
+            return
+
+        target_drv = drv or self.dmp_drv
+        try:
+            # 取得瀏覽器視窗的位置與大小
+            rect = target_drv.get_window_rect()
+            win_x = rect['x']
+            win_y = rect['y']
+            win_w = rect['width']
+            win_h = rect['height']
+        except Exception:
+            # 若無法取得視窗資訊，使用螢幕中央估算
+            sw, sh = pyautogui.size()
+            win_x, win_y, win_w, win_h = sw // 4, sh // 4, sw // 2, sh // 2
+
+        # 對話框出現在視窗上半部，「開啟」按鈕在對話框右側
+        # 依截圖比例估算座標（視窗寬度中央偏右，垂直約 35%）
+        click_x = win_x + int(win_w * 0.62)
+        click_y = win_y + int(win_h * 0.35)
+
+        self._ql('⏳ 等待 WNJPHandler 對話框...', 'INFO')
+        for attempt in range(16):   # 最多等 8 秒（每 0.5 秒試一次）
+            time.sleep(0.5)
+            try:
+                # 截圖確認對話框是否出現（在估算區域附近找「開啟」文字的按鈕色塊）
+                screenshot = pyautogui.screenshot(
+                    region=(win_x + int(win_w * 0.3),
+                            win_y + int(win_h * 0.2),
+                            int(win_w * 0.5),
+                            int(win_h * 0.3)))
+                # 檢查該區域是否有對話框特徵色（白色背景區塊）
+                pixels = screenshot.getdata()
+                white_count = sum(1 for r, g, b in pixels if r > 240 and g > 240 and b > 240)
+                if white_count > len(pixels) * 0.3:  # 超過 30% 為白色 → 對話框存在
+                    pyautogui.click(click_x, click_y)
+                    self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
+                    self._q(type='dot', sys='dmp', ok=True)
+                    return
+            except Exception:
+                pass
+
+        self._ql('⚠ 未偵測到對話框，請手動點擊「開啟」', 'WARN')
 
     # ══════════════════════════════════════════════════════════════════
     #  GeDCC 開啟（雙擊觸發）
