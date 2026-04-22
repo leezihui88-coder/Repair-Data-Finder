@@ -488,14 +488,13 @@ class App:
 
         self._div(pnl)
         self._sec(pnl, '帳密管理')
-        for label, sys_key in [('🔑  管理 PDM 密碼', 'pdm'), ('🔑  管理 GeDCC 密碼', 'gedcc')]:
-            tk.Button(pnl, text=label,
-                      font=('Segoe UI', 9), bg=C['bg_card'], fg=C['text_dim'],
-                      activebackground=C['border'],
-                      relief='flat', bd=0, pady=7,
-                      cursor='hand2',
-                      command=lambda k=sys_key: self._manage_cred(k)).pack(
-                          fill='x', padx=14, pady=(0, 4))
+        tk.Button(pnl, text='🔑  管理 PDM 密碼',
+                  font=('Segoe UI', 9), bg=C['bg_card'], fg=C['text_dim'],
+                  activebackground=C['border'],
+                  relief='flat', bd=0, pady=7,
+                  cursor='hand2',
+                  command=lambda: self._manage_cred('pdm')).pack(
+                      fill='x', padx=14, pady=(0, 4))
 
         self._div(pnl)
         self._sec(pnl, '資料匯出')
@@ -1017,196 +1016,121 @@ class App:
         return True
 
     # ══════════════════════════════════════════════════════════════════
-    #  GeDCC 登入（自動填入 + fallback 手動）
+    #  WNJPHandler 對話框：自動點擊「開啟」
     # ══════════════════════════════════════════════════════════════════
-    def _gedcc_login(self, drv) -> bool:
+    def _auto_click_wnjp_dialog(self):
         """
-        完整 GeDCC 登入流程（含自動填入、密碼變更偵測）。
-        已在 DMP/private 則直接回傳 True。
+        使用 Windows UI Automation 自動點擊瀏覽器的「開啟 WNJPHandler」對話框。
+        最多等候 8 秒，每 0.5 秒嘗試一次。
         """
-        if 'DMP/private' in drv.current_url:
-            return True
-
-        drv.get(GEDCC_URL)
-        time.sleep(1.5)
-
-        saved_user, saved_pwd = CredentialManager.load('gedcc')
-        if not saved_user:
-            # 第一次：彈出對話框
-            self._ql('ℹ️ GeDCC 尚無儲存帳密，請輸入', 'INFO')
-            cred = self._ask_credentials('gedcc')
-            if not cred:
-                # Fallback：手動
-                return self._gedcc_manual_login(drv)
-            saved_user, saved_pwd, remember = cred
-            if remember:
-                CredentialManager.save('gedcc', saved_user, saved_pwd)
-                self._ql('✅ GeDCC 帳密已儲存', 'OK')
-
-        # 嘗試自動填入
-        login_ok = self._gedcc_autofill(drv, saved_user, saved_pwd)
-        if login_ok:
-            return True
-
-        # 自動填入失敗 → 密碼可能更換
-        self._ql('⚠ GeDCC 自動登入失敗，密碼可能已更換', 'WARN')
-        cred = self._ask_credentials(
-            'gedcc', prefill_user=saved_user,
-            message='⚠ 登入失敗！密碼可能已更換，請重新輸入。')
-        if not cred:
-            return self._gedcc_manual_login(drv)
-        new_user, new_pwd, _ = cred
-
-        drv.get(GEDCC_URL); time.sleep(1.5)
-        login_ok = self._gedcc_autofill(drv, new_user, new_pwd)
-        if not login_ok:
-            return self._gedcc_manual_login(drv)
-
-        # 密碼有變更 → 詢問是否儲存
-        if new_pwd != saved_pwd or new_user != saved_user:
-            self._ql('🔔 偵測到 GeDCC 密碼與儲存的不同', 'WARN')
-            if self._ask_save_password('gedcc'):
-                CredentialManager.save('gedcc', new_user, new_pwd)
-                self._ql('✅ GeDCC 新密碼已儲存', 'OK')
-        return True
-
-    def _gedcc_autofill(self, drv, user: str, pwd: str) -> bool:
-        """自動填入 GeDCC ShowLogin.jsp，登入成功回傳 True"""
-        user_xpaths = [
-            '//input[@name="username"]',
-            '//input[@id="username"]',
-            '//input[@type="text" and contains(@name,"user")]',
-            '//input[@autocomplete="username"]',
-            '//input[@type="text"][1]',
-        ]
-        pwd_xpaths = [
-            '//input[@name="password"]',
-            '//input[@id="password"]',
-            '//input[@type="password"]',
-        ]
+        import subprocess as _sp
+        ps_script = r"""
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$desktop = [System.Windows.Automation.AutomationElement]::RootElement
+$found = $false
+for ($i = 0; $i -lt 16; $i++) {
+    foreach ($name in @("開啟", "Open")) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $name)
+        $btn = $desktop.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($btn -ne $null) {
+            try {
+                $invoke = $btn.GetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern)
+                $invoke.Invoke()
+                Write-Output "clicked"
+                $found = $true
+                break
+            } catch {}
+        }
+    }
+    if ($found) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $found) { Write-Output "not_found" }
+"""
         try:
-            user_el = None
-            for xp in user_xpaths:
-                try:
-                    user_el = WebDriverWait(drv, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, xp)))
-                    break
-                except Exception:
-                    continue
-            if not user_el: return False
-
-            pwd_el = None
-            for xp in pwd_xpaths:
-                try:
-                    pwd_el = drv.find_element(By.XPATH, xp); break
-                except Exception: continue
-            if not pwd_el: return False
-
-            self._ql('🔐 正在自動填入 GeDCC 帳密...', 'INFO')
-            drv.execute_script("arguments[0].value = '';", user_el)
-            user_el.click(); user_el.send_keys(user)
-            drv.execute_script("arguments[0].value = '';", pwd_el)
-            pwd_el.click();  pwd_el.send_keys(pwd)
-            pwd_el.send_keys(Keys.RETURN)
-            time.sleep(3)
-
-            if 'DMP/private' in drv.current_url:
-                self._ql('✅ GeDCC 自動登入成功', 'OK')
+            result = _sp.run(
+                ['powershell', '-NonInteractive', '-Command', ps_script],
+                capture_output=True, text=True, timeout=12)
+            if 'clicked' in result.stdout:
+                self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
                 self._q(type='dot', sys='dmp', ok=True)
-                return True
-
-            # 嘗試多一次等待（慢網路）
-            try:
-                WebDriverWait(drv, 10).until(
-                    lambda d: 'DMP/private' in d.current_url)
-                self._ql('✅ GeDCC 自動登入成功', 'OK')
-                self._q(type='dot', sys='dmp', ok=True)
-                return True
-            except Exception:
-                return False
-
+            else:
+                self._ql('⚠ 找不到「開啟」按鈕，請手動點擊', 'WARN')
         except Exception as e:
-            self._ql(f'GeDCC 自動填入例外：{str(e)[:60]}', 'WARN')
-            return False
-
-    def _gedcc_manual_login(self, drv) -> bool:
-        """Fallback：手動登入"""
-        self._ql('⚠ 請在 GeDCC 視窗手動登入', 'WARN')
-        self._q(type='popup', sys='GeDCC (DMP)')
-        try:
-            WebDriverWait(drv, 180).until(
-                lambda d: 'DMP/private' in d.current_url)
-            self._ql('✅ GeDCC 手動登入成功', 'OK')
-            self._q(type='dot', sys='dmp', ok=True)
-            # 詢問是否儲存
-            saved_user, _ = CredentialManager.load('gedcc')
-            if not saved_user:
-                cred = self._ask_credentials(
-                    'gedcc',
-                    message='是否儲存帳密以便下次自動登入？')
-                if cred:
-                    u, p, remember = cred
-                    if remember:
-                        CredentialManager.save('gedcc', u, p)
-                        self._ql('✅ GeDCC 帳密已儲存', 'OK')
-            return True
-        except TimeoutException:
-            self._ql('❌ GeDCC 登入等候逾時', 'ERROR')
-            return False
+            self._ql(f'UI Automation 例外：{str(e)[:60]}', 'WARN')
 
     # ══════════════════════════════════════════════════════════════════
     #  GeDCC 開啟（雙擊觸發）
     # ══════════════════════════════════════════════════════════════════
     def _open_gedcc(self, pcb_num: str):
         try:
+            # ── 確認瀏覽器存活 ───────────────────────────────────────
             need_new = False
             if self.dmp_drv is None:
                 need_new = True
             else:
-                try: _ = self.dmp_drv.current_url
-                except Exception: need_new = True
+                try:
+                    _ = self.dmp_drv.current_url
+                except Exception:
+                    need_new = True
 
             if need_new:
                 self.dmp_drv = self._init_browser('dmp')
-                if not self.dmp_drv: return
+                if not self.dmp_drv:
+                    return
                 self._q(type='dot', sys='dmp', ok=False)
 
             drv = self.dmp_drv
 
-            # ── 登入（含自動填入）────────────────────────────────────
+            # ── 開啟 GeDCC，並自動處理 WNJPHandler 對話框 ──────────
             if 'DMP/private' not in drv.current_url:
-                if not self._gedcc_login(drv):
-                    return
-
-            if 'user_index' not in drv.current_url:
-                drv.get(GEDCC_HOME); time.sleep(1.5)
-
-            # ── 填入搜尋框 ───────────────────────────────────────────
-            try:
-                sel_el = WebDriverWait(drv, 5).until(EC.presence_of_element_located((
-                    By.XPATH,
-                    '//select[option[normalize-space()="料號"]]'
-                    '|//select[contains(@name,"type") or contains(@id,"type")]'
-                )))
-                Select(sel_el).select_by_visible_text('料號')
-                time.sleep(0.3)
-            except Exception:
-                pass
-
-            for xp in [
-                '//input[@name="bqKeyword"]', '//input[@id="bqKeyword"]',
-                '//form//input[@type="text"][1]',
-            ]:
+                drv.get(GEDCC_URL)
+                self._ql('🌐 正在開啟 GeDCC...', 'INFO')
+                # 在背景同步等待並自動點擊「開啟」對話框
+                threading.Thread(
+                    target=self._auto_click_wnjp_dialog, daemon=True).start()
                 try:
-                    inp = WebDriverWait(drv, 3).until(
-                        EC.element_to_be_clickable((By.XPATH, xp)))
-                    drv.execute_script("arguments[0].value = '';", inp)
-                    inp.click(); inp.send_keys(pcb_num); inp.send_keys(Keys.RETURN)
-                    self._ql(f'✅ GeDCC 查詢已送出：{pcb_num}', 'OK')
-                    return
+                    WebDriverWait(drv, 30).until(
+                        lambda d: 'DMP/private' in d.current_url)
+                    self._ql('✅ GeDCC 已就緒', 'OK')
+                    self._q(type='dot', sys='dmp', ok=True)
+                except TimeoutException:
+                    # WNJPHandler 模式：不跳轉到 DMP/private，直接繼續
+                    self._ql('ℹ️ GeDCC 以 WNJPHandler 模式開啟', 'INFO')
+
+            # ── 嘗試在網頁搜尋框填入料號 ────────────────────────────
+            if 'DMP/private' in drv.current_url:
+                if 'user_index' not in drv.current_url:
+                    drv.get(GEDCC_HOME)
+                    time.sleep(1.5)
+                try:
+                    sel_el = WebDriverWait(drv, 5).until(
+                        EC.presence_of_element_located((By.XPATH,
+                        '//select[option[normalize-space()="料號"]]'
+                        '|//select[contains(@name,"type") or contains(@id,"type")]')))
+                    Select(sel_el).select_by_visible_text('料號')
+                    time.sleep(0.3)
                 except Exception:
-                    continue
-            self._ql('❌ 找不到 GeDCC 搜尋框', 'ERROR')
+                    pass
+                for xp in ['//input[@name="bqKeyword"]', '//input[@id="bqKeyword"]',
+                            '//form//input[@type="text"][1]']:
+                    try:
+                        inp = WebDriverWait(drv, 3).until(
+                            EC.element_to_be_clickable((By.XPATH, xp)))
+                        drv.execute_script("arguments[0].value = '';", inp)
+                        inp.click()
+                        inp.send_keys(pcb_num)
+                        inp.send_keys(Keys.RETURN)
+                        self._ql(f'✅ GeDCC 查詢已送出：{pcb_num}', 'OK')
+                        return
+                    except Exception:
+                        continue
+                self._ql('❌ 找不到 GeDCC 搜尋框', 'ERROR')
+
         except Exception as e:
             self._ql(f'GeDCC 開啟錯誤：{str(e)[:60]}', 'ERROR')
 
@@ -1215,15 +1139,30 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     def _init_browser(self, label='pdm'):
         import subprocess as _sp
+
+        # GeDCC 瀏覽器：使用 persistent profile 記住 WNJPHandler 許可
+        # 第一次手動點「開啟」後，之後永遠不再詢問
+        prefs = {
+            'protocol_handler.excluded_schemes': {'wnjp': False},
+        }
+        extra_args = []
+        if label == 'dmp':
+            profile_dir = os.path.join(
+                os.path.expanduser('~'), '.rdf_profiles', 'gedcc')
+            os.makedirs(profile_dir, exist_ok=True)
+            extra_args.append(f'--user-data-dir={profile_dir}')
+            prefs['protocol_handler.allowed_origin_protocol_pairs'] = {
+                'http://global-gedcc.moxa.com': {'wnjp': True}
+            }
+
         try:
             o = EdgeOptions()
             for a in ['--ignore-certificate-errors', '--ignore-ssl-errors',
-                      '--log-level=3', '--silent']:
+                      '--log-level=3', '--silent'] + extra_args:
                 o.add_argument(a)
             o.add_experimental_option('excludeSwitches',
                                        ['enable-logging', 'enable-automation'])
-            o.add_experimental_option('prefs',
-                {'protocol_handler.excluded_schemes': {'wnjp': False}})
+            o.add_experimental_option('prefs', prefs)
             drv = webdriver.Edge(
                 service=EdgeService(log_output=_sp.DEVNULL), options=o)
             self._ql(f'✅ 已成功連結 Edge 瀏覽器 ({label})', 'OK')
@@ -1233,10 +1172,11 @@ class App:
         try:
             o = ChromeOptions()
             for a in ['--ignore-certificate-errors', '--ignore-ssl-errors',
-                      '--log-level=3', '--silent']:
+                      '--log-level=3', '--silent'] + extra_args:
                 o.add_argument(a)
             o.add_experimental_option('excludeSwitches',
                                        ['enable-logging', 'enable-automation'])
+            o.add_experimental_option('prefs', prefs)
             drv = webdriver.Chrome(
                 service=ChromeService(log_output=_sp.DEVNULL), options=o)
             self._ql(f'✅ 已成功連結 Chrome 瀏覽器 ({label})', 'OK')
