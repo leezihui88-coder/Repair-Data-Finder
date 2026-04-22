@@ -1,11 +1,12 @@
 [project]
-name = "finder"
-version = "0.1.0"
-description = "Add your description here"
+name = "repair-data-finder"
+version = "1.0.0"
+description = "MOXA Repair Data Finder - PDM & GeDCC automation tool"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pyinstaller>=6.19.0",
     "selenium>=4.43.0",
     "webdriver-manager>=4.0.2",
+    "keyring>=25.0.0",
 ]
