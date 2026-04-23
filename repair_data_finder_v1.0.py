@@ -1208,11 +1208,14 @@ class App:
 
             # ── 開啟 GeDCC，並自動處理 WNJPHandler 對話框 ──────────
             if 'DMP/private' not in drv.current_url:
-                drv.get(GEDCC_URL)
-                self._ql('🌐 正在開啟 GeDCC...', 'INFO')
-                # 在背景同步等待並自動點擊「開啟」對話框
+                # ★ Thread 必須在 drv.get() 之前啟動：
+                #   drv.get() 會 block 等待頁面載入完成，
+                #   但 WNJPHandler 對話框正是在載入期間出現，
+                #   若 thread 在 drv.get() 之後啟動，對話框早已出現卻沒人偵測。
                 threading.Thread(
                     target=self._auto_click_wnjp_dialog, daemon=True).start()
+                drv.get(GEDCC_URL)
+                self._ql('🌐 正在開啟 GeDCC...', 'INFO')
                 try:
                     WebDriverWait(drv, 30).until(
                         lambda d: 'DMP/private' in d.current_url)
