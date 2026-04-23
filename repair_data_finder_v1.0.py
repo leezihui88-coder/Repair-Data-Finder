@@ -834,21 +834,7 @@ class App:
                 self._q(type='done'); return
 
             self._ql(f'✅ 共找到 {len(pcb_list)} 個 1199 PCB 料號', 'OK')
-            self._qp(55, f'共 {len(pcb_list)} 個 PCB 料號')
-
-            fg_name = self._get_fg_name(fg_pn)
-            self._q(type='banner',
-                    text=f'🔎  {fg_pn}  {fg_name}'.strip())
-
-            if not self.running:
-                self._q(type='done'); return
-
-            for p in pcb_list:
-                pcb_txt = p.get('text') or p['num']
-                pcb_txt = re.sub(r'(版本|名稱)\s*[:：]?\s*', ' ', pcb_txt).split('狀態')[0].strip()
-                self._q(type='add', st='✅ 找到', pcb=p['num'],
-                        pcbtxt=pcb_txt, tag='ok')
-
+            # ★ banner 和每筆結果已在掃描過程中即時顯示，無需再次 loop
             self._qp(100, '✅ 檢索完成！')
             self._ql('🎉 掃描完畢！雙擊任一列可開啟 GeDCC 查詢。', 'OK')
 
@@ -1277,6 +1263,11 @@ if (-not $found) { Write-Output "not_found" }
             if not result_link: return parts
             result_link.click(); time.sleep(6)
 
+            # ★ 找到產品頁後立即顯示 banner（不等掃描完）
+            fg_name = self._get_fg_name(fg_pn)
+            self._q(type='banner',
+                    text=f'🔎  {fg_pn}  {fg_name}'.strip())
+
             struct_tab = None
             for xp in [
                 '//span[normalize-space()="結構"]',
@@ -1432,10 +1423,15 @@ if (-not $found) { Write-Output "not_found" }
                     n = item.get('num', '')
                     if not n or n in seen: continue
                     seen.add(n); found = True
+                    # 文字後處理（與 _run 原本的處理一致）
+                    pcb_txt = item.get('text', n)
+                    pcb_txt = re.sub(r'(版本|名稱)\s*[:：]?\s*', ' ', pcb_txt).split('狀態')[0].strip()
                     parts.append({'num': n,
-                                  'text': item.get('text', n),
+                                  'text': pcb_txt,
                                   'parentText': item.get('parentText', '')})
-                    self._ql(f'  [{len(parts)}] {item.get("text", n)[:50]}', 'OK')
+                    self._ql(f'  [{len(parts)}] {pcb_txt[:50]}', 'OK')
+                    # ★ 找到一個立即顯示在 table，不等全部掃完
+                    self._q(type='add', st='✅ 找到', pcb=n, pcbtxt=pcb_txt, tag='ok')
                 return found
 
             _collect(drv.execute_script(_js_scan))
