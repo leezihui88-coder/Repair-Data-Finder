@@ -1038,10 +1038,10 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     #  WNJPHandler 對話框：自動點擊「開啟」
     # ══════════════════════════════════════════════════════════════════
-    def _auto_click_wnjp_dialog(self, drv=None):
+    def _auto_click_wnjp_dialog(self):
         """
-        使用 Windows UI Automation (PowerShell) 自動點擊「開啟 WNJPHandler」對話框。
-        最多等候 12 秒，每 0.5 秒嘗試一次。
+        使用 Windows UI Automation 自動點擊瀏覽器的「開啟 WNJPHandler」對話框。
+        最多等候 8 秒，每 0.5 秒嘗試一次。
         """
         import subprocess as _sp
         ps_script = r"""
@@ -1049,7 +1049,7 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $desktop = [System.Windows.Automation.AutomationElement]::RootElement
 $found = $false
-for ($i = 0; $i -lt 24; $i++) {
+for ($i = 0; $i -lt 16; $i++) {
     foreach ($name in @("開啟", "Open")) {
         $cond = New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty, $name)
@@ -1071,11 +1071,10 @@ for ($i = 0; $i -lt 24; $i++) {
 }
 if (-not $found) { Write-Output "not_found" }
 """
-        self._ql('⏳ 等待 WNJPHandler 對話框（UI Automation）...', 'INFO')
         try:
             result = _sp.run(
                 ['powershell', '-NonInteractive', '-Command', ps_script],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True, timeout=12)
             if 'clicked' in result.stdout:
                 self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
                 self._q(type='dot', sys='dmp', ok=True)
