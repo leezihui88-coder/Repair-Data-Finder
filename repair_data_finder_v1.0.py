@@ -1040,148 +1040,49 @@ class App:
     # ══════════════════════════════════════════════════════════════════
     def _auto_click_wnjp_dialog(self, drv=None):
         """
-        自動點擊「開啟 WNJPHandler」對話框的「開啟」按鈕。
-
-        對話框佈局（從截圖確認）：
-          [ 開啟（白色） ]  [ 取消（藍色 #0078D4） ]
-
-        策略：
-          1. all_screens=True 截取所有螢幕（含雙螢幕）
-          2. 虛擬螢幕偏移修正（多螢幕負座標問題）
-          3. 廣義藍色偵測 + Grid 80px 分格找密集群
-          4. DPI 修正：物理像素 → 邏輯座標
-          5. 雙擊確保觸發
-          6. debug 截圖每 6 秒存至桌面供排查
-          7. 最多等候 20 秒
+        使用 Windows UI Automation (PowerShell) 自動點擊「開啟 WNJPHandler」對話框。
+        最多等候 12 秒，每 0.5 秒嘗試一次。
         """
+        import subprocess as _sp
+        ps_script = r"""
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$desktop = [System.Windows.Automation.AutomationElement]::RootElement
+$found = $false
+for ($i = 0; $i -lt 24; $i++) {
+    foreach ($name in @("開啟", "Open")) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::NameProperty, $name)
+        $btn = $desktop.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if ($btn -ne $null) {
+            try {
+                $invoke = $btn.GetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern)
+                $invoke.Invoke()
+                Write-Output "clicked"
+                $found = $true
+                break
+            } catch {}
+        }
+    }
+    if ($found) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (-not $found) { Write-Output "not_found" }
+"""
+        self._ql('⏳ 等待 WNJPHandler 對話框（UI Automation）...', 'INFO')
         try:
-            import pyautogui
-            from PIL import ImageGrab
-            import ctypes
-        except ImportError as e:
-            self._ql(f'⚠ 缺少套件，無法自動點擊：{e}', 'WARN')
-            return
-
-        pyautogui.FAILSAFE = False   # 避免滑鼠移到角落時拋出例外
-
-        # ── DPI 縮放比（物理像素 → 邏輯座標）──────────────────────────
-        scale = 1.0
-        try:
-            dpi = ctypes.windll.user32.GetDpiForSystem()
-            scale = dpi / 96.0
-        except Exception:
-            pass
-
-        # ── 虛擬螢幕偏移（多螢幕時截圖左上角可能不是 0,0）──────────
-        virt_x, virt_y = 0, 0
-        try:
-            virt_x = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-            virt_y = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-        except Exception:
-            pass
-
-        self._ql(
-            f'⏳ 等待 WNJPHandler 對話框'
-            f'（DPI {scale:.2f}x，虛擬偏移 {virt_x},{virt_y}）...', 'INFO')
-
-        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-        if not os.path.isdir(desktop):
-            desktop = os.path.expanduser('~')
-
-        for attempt in range(40):   # 最多 20 秒（每 0.5 秒）
-            time.sleep(0.5)
-            try:
-                # ── 截取「所有螢幕」（雙螢幕不漏掉）────────────────
-                try:
-                    img = ImageGrab.grab(all_screens=True).convert('RGB')
-                except TypeError:
-                    img = ImageGrab.grab().convert('RGB')  # 舊版 Pillow fallback
-                pw, ph = img.size
-                pix = img.load()
-
-                # ── 每 6 秒存 debug 截圖 ─────────────────────────
-                if attempt % 12 == 0:
-                    try:
-                        dbg = os.path.join(desktop, f'rdf_wnjp_{attempt:02d}.png')
-                        img.save(dbg)
-                        self._ql(f'  🖼 debug 截圖: {dbg} ({pw}×{ph})', 'INFO')
-                    except Exception:
-                        pass
-
-                # ── 廣義藍色掃描（步進 2px）──────────────────────
-                blue_xs, blue_ys = [], []
-                for sy in range(0, ph, 2):
-                    for sx in range(0, pw, 2):
-                        r, g, b = pix[sx, sy]
-                        # 廣義藍色：B 明顯大於 R 和 G，且夠亮
-                        if b > 140 and b > r + 60 and b > g + 30 and r < 150:
-                            blue_xs.append(sx)
-                            blue_ys.append(sy)
-
-                n = len(blue_xs)
-                if attempt % 4 == 0:
-                    self._ql(f'  藍色像素 {n} 個（截圖 {pw}×{ph}）', 'INFO')
-
-                if n < 15:
-                    continue
-
-                # ── Grid 分格（80px），找最密集藍色群 ────────────
-                from collections import defaultdict
-                CELL = 80
-                cells = defaultdict(lambda: {'xs': [], 'ys': []})
-                for bx, by in zip(blue_xs, blue_ys):
-                    k = (bx // CELL, by // CELL)
-                    cells[k]['xs'].append(bx)
-                    cells[k]['ys'].append(by)
-
-                best = max(cells, key=lambda k: len(cells[k]['xs']))
-
-                merged_xs, merged_ys = [], []
-                for dk in [(-1, 0), (0, 0), (1, 0), (0, -1), (0, 1)]:
-                    nk = (best[0] + dk[0], best[1] + dk[1])
-                    if nk in cells:
-                        merged_xs.extend(cells[nk]['xs'])
-                        merged_ys.extend(cells[nk]['ys'])
-
-                if len(merged_xs) < 15:
-                    continue
-
-                x_span = max(merged_xs) - min(merged_xs)
-                y_span = max(merged_ys) - min(merged_ys)
-                self._ql(
-                    f'  最大藍色群 {len(merged_xs)} px，{x_span}×{y_span}', 'INFO')
-
-                if x_span > 350 or y_span > 120:
-                    self._ql('  群太大（頁面元素），繼續等待...', 'INFO')
-                    continue
-
-                # ── 物理截圖座標 → 物理螢幕座標 → 邏輯座標 ─────
-                phys_x = int(sum(merged_xs) / len(merged_xs)) + virt_x
-                phys_y = int(sum(merged_ys) / len(merged_ys)) + virt_y
-                cancel_x = int(phys_x / scale)
-                cancel_y = int(phys_y / scale)
-
-                # 開啟在取消左邊，偏移 = 按鈕寬 + 間距
-                offset = max(int(x_span / scale) + 30, 120)
-                open_x = cancel_x - offset
-                open_y = cancel_y
-
-                self._ql(
-                    f'  取消:({cancel_x},{cancel_y}) → 開啟:({open_x},{open_y})',
-                    'INFO')
-
-                # ── 雙擊（確保對話框有 focus 且按鈕被觸發）────────
-                pyautogui.click(open_x, open_y)
-                time.sleep(0.15)
-                pyautogui.click(open_x, open_y)
-                self._ql('✅ 已自動點擊「開啟」（雙擊）', 'OK')
+            result = _sp.run(
+                ['powershell', '-NonInteractive', '-Command', ps_script],
+                capture_output=True, text=True, timeout=15)
+            if 'clicked' in result.stdout:
+                self._ql('✅ 已自動點擊「開啟」按鈕', 'OK')
                 self._q(type='dot', sys='dmp', ok=True)
-                return
-
-            except Exception as e:
-                self._ql(f'偵測例外：{str(e)[:80]}', 'WARN')
-
-        self._ql('⚠ 未偵測到對話框，請手動點擊「開啟」', 'WARN')
+            else:
+                self._ql('⚠ 找不到「開啟」按鈕，請手動點擊', 'WARN')
+        except Exception as e:
+            self._ql(f'UI Automation 例外：{str(e)[:60]}', 'WARN')
 
     # ══════════════════════════════════════════════════════════════════
     #  GeDCC 開啟（雙擊觸發）
