@@ -1046,10 +1046,11 @@ class App:
           [ 開啟（白色） ]  [ 取消（藍色 #0078D4） ]
 
         策略：
-          用 PIL.ImageGrab 截圖（不依賴 pyscreeze），
-          在瀏覽器視窗內搜尋 Edge 藍色像素群（取消按鈕），
-          往左偏移一個按鈕寬度點擊「開啟」。
-          最多等候 10 秒。
+          1. 全螢幕截圖（不限定瀏覽器視窗，避免 DPI 縮放造成座標偏移）
+          2. 廣義藍色偵測（b > r+60 且 b > g+30），涵蓋 Edge 各版渲染差異
+          3. Grid 分格（80px）找最密集藍色群，排除分散的頁面元素
+          4. DPI 修正：物理像素 → 邏輯座標供 pyautogui 使用
+          5. 最多等候 20 秒
         """
         try:
             import pyautogui
@@ -1058,69 +1059,96 @@ class App:
             self._ql(f'⚠ 缺少套件，無法自動點擊：{e}', 'WARN')
             return
 
-        target_drv = drv or self.dmp_drv
-
-        # 取得瀏覽器視窗範圍
+        # ── DPI 縮放比（物理像素 → 邏輯座標）──────────────────────────
+        scale = 1.0
         try:
-            rect = target_drv.get_window_rect()
-            wx, wy = rect['x'], rect['y']
-            ww, wh = rect['width'], rect['height']
+            import ctypes
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+            scale = dpi / 96.0
         except Exception:
-            sw, sh = pyautogui.size()       # 修正：避免 *unpack 語法問題
-            wx, wy, ww, wh = 0, 0, sw, sh
+            pass
 
-        self._ql('⏳ 等待 WNJPHandler 對話框...', 'INFO')
+        self._ql(f'⏳ 等待 WNJPHandler 對話框（DPI {scale:.2f}x）...', 'INFO')
 
-        for _ in range(20):          # 最多 10 秒（每 0.5 秒）
+        for attempt in range(40):   # 最多 20 秒（每 0.5 秒）
             time.sleep(0.5)
             try:
-                # PIL.ImageGrab 直接截圖，不需要 pyscreeze
-                img  = ImageGrab.grab().convert('RGB')
+                # 全螢幕截圖（物理像素，不依賴視窗座標）
+                img = ImageGrab.grab().convert('RGB')
                 pw, ph = img.size
-                pix  = img.load()
+                pix = img.load()
 
-                # 搜尋範圍：瀏覽器視窗內，跳過頂部 80px（標題列 + 網址列）
-                x1 = max(0, wx);       x2 = min(pw, wx + ww)
-                y1 = max(0, wy + 80);  y2 = min(ph, wy + wh)
-
-                # 掃描 Edge 藍色像素（#0078D4 ± 容差）
+                # ── 廣義藍色掃描（步進 2px）──────────────────────────
                 blue_xs, blue_ys = [], []
-                for sy in range(y1, y2, 3):
-                    for sx in range(x1, x2, 3):
+                for sy in range(0, ph, 2):
+                    for sx in range(0, pw, 2):
                         r, g, b = pix[sx, sy]
-                        if r < 60 and 90 < g < 170 and b > 180:
+                        # 廣義藍色：B 明顯大於 R 和 G，且夠亮
+                        if b > 140 and b > r + 60 and b > g + 30 and r < 150:
                             blue_xs.append(sx)
                             blue_ys.append(sy)
 
-                if len(blue_xs) < 20:   # 藍色像素不足，對話框尚未出現
+                if len(blue_xs) < 15:
+                    if attempt % 6 == 0:    # 每 3 秒 log 一次
+                        self._ql(f'  藍色像素 {len(blue_xs)} 個，繼續等待...', 'INFO')
                     continue
 
-                # 確認藍色像素是緊密的按鈕形狀（非散落在頁面各處的連結）
-                x_span = max(blue_xs) - min(blue_xs)
-                y_span = max(blue_ys) - min(blue_ys)
-                if x_span > 250 or y_span > 80:
-                    # 範圍太大 → 是頁面元素，非對話框按鈕，繼續等待
+                # ── Grid 分格（80px），找最密集的按鈕形狀群──────────
+                from collections import defaultdict
+                CELL = 80
+                cells = defaultdict(lambda: {'xs': [], 'ys': []})
+                for bx, by in zip(blue_xs, blue_ys):
+                    k = (bx // CELL, by // CELL)
+                    cells[k]['xs'].append(bx)
+                    cells[k]['ys'].append(by)
+
+                # 找像素最多的格子
+                best = max(cells, key=lambda k: len(cells[k]['xs']))
+
+                # 合併鄰格（5 方向）
+                merged_xs, merged_ys = [], []
+                for dk in [(-1, 0), (0, 0), (1, 0), (0, -1), (0, 1)]:
+                    nk = (best[0] + dk[0], best[1] + dk[1])
+                    if nk in cells:
+                        merged_xs.extend(cells[nk]['xs'])
+                        merged_ys.extend(cells[nk]['ys'])
+
+                if len(merged_xs) < 15:
                     continue
 
-                # 藍色按鈕（取消）中心
-                cancel_x = int(sum(blue_xs) / len(blue_xs))
-                cancel_y = int(sum(blue_ys) / len(blue_ys))
+                x_span = max(merged_xs) - min(merged_xs)
+                y_span = max(merged_ys) - min(merged_ys)
 
-                # 往左偏移找「開啟」（開啟在取消左邊）
-                offset = max(x_span + 24, 100)
+                if attempt % 4 == 0:
+                    self._ql(
+                        f'  最大藍色群：{len(merged_xs)} px，'
+                        f'範圍 {x_span}×{y_span}', 'INFO')
+
+                if x_span > 350 or y_span > 120:
+                    # 仍太大 → 頁面元素，繼續等待
+                    continue
+
+                # ── 取消按鈕中心（物理像素 → 邏輯座標）──────────────
+                cancel_phys_x = int(sum(merged_xs) / len(merged_xs))
+                cancel_phys_y = int(sum(merged_ys) / len(merged_ys))
+                cancel_x = int(cancel_phys_x / scale)
+                cancel_y = int(cancel_phys_y / scale)
+
+                # 開啟在取消左邊，偏移 = 按鈕寬 + 間距
+                offset = max(int(x_span / scale) + 30, 120)
                 open_x = cancel_x - offset
                 open_y = cancel_y
 
-                pyautogui.click(open_x, open_y)
                 self._ql(
-                    f'✅ 已自動點擊「開啟」'
-                    f'（取消:{cancel_x},{cancel_y} → 開啟:{open_x},{open_y}）',
-                    'OK')
+                    f'  取消:({cancel_x},{cancel_y}) → 開啟:({open_x},{open_y})',
+                    'INFO')
+                pyautogui.click(open_x, open_y)
+                self._ql('✅ 已自動點擊「開啟」', 'OK')
                 self._q(type='dot', sys='dmp', ok=True)
                 return
 
             except Exception as e:
-                self._ql(f'偵測例外：{str(e)[:50]}', 'WARN')
+                self._ql(f'偵測例外：{str(e)[:80]}', 'WARN')
 
         self._ql('⚠ 未偵測到對話框，請手動點擊「開啟」', 'WARN')
 
