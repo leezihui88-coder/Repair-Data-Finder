@@ -1066,7 +1066,8 @@ class App:
             wx, wy = rect['x'], rect['y']
             ww, wh = rect['width'], rect['height']
         except Exception:
-            wx, wy, ww, wh = 0, 0, *pyautogui.size()
+            sw, sh = pyautogui.size()       # 修正：避免 *unpack 語法問題
+            wx, wy, ww, wh = 0, 0, sw, sh
 
         self._ql('⏳ 等待 WNJPHandler 對話框...', 'INFO')
 
@@ -1094,15 +1095,21 @@ class App:
                 if len(blue_xs) < 20:   # 藍色像素不足，對話框尚未出現
                     continue
 
+                # 確認藍色像素是緊密的按鈕形狀（非散落在頁面各處的連結）
+                x_span = max(blue_xs) - min(blue_xs)
+                y_span = max(blue_ys) - min(blue_ys)
+                if x_span > 250 or y_span > 80:
+                    # 範圍太大 → 是頁面元素，非對話框按鈕，繼續等待
+                    continue
+
                 # 藍色按鈕（取消）中心
                 cancel_x = int(sum(blue_xs) / len(blue_xs))
                 cancel_y = int(sum(blue_ys) / len(blue_ys))
 
-                # 按鈕寬度估算，往左找「開啟」
-                btn_span = max(blue_xs) - min(blue_xs)
-                offset   = max(btn_span + 24, 100)
-                open_x   = cancel_x - offset
-                open_y   = cancel_y
+                # 往左偏移找「開啟」（開啟在取消左邊）
+                offset = max(x_span + 24, 100)
+                open_x = cancel_x - offset
+                open_y = cancel_y
 
                 pyautogui.click(open_x, open_y)
                 self._ql(
